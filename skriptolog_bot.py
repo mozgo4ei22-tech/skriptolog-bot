@@ -289,20 +289,31 @@ async def build_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     ts = int(time.time())
     last = s.entries[-5:]
-    entries_text = parts = []
-for e in last:
-    clean_reply = e['reply'].replace("\n", " ")
-    parts.append(f"[{e['intent']}] {e['client']} => {clean_reply}")
-entries_text = " || ".join(parts)
 
-    row = {"timestamp": ts, "agent_id": uid, "summary": summary, "entries": entries_text}
+    parts = []
+    for e in last:
+        clean_reply = e['reply'].replace("\n", " ")
+        parts.append(f"[{e['intent']}] {e['client']} => {clean_reply}")
+    entries_text = " || ".join(parts)
+
+    row = {
+        "timestamp": ts,
+        "agent_id": uid,
+        "summary": summary,
+        "entries": entries_text
+    }
+
     file_exists = os.path.exists(CSV_PATH)
     with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=list(row.keys()))
-        if not file_exists: writer.writeheader()
+        if not file_exists:
+            writer.writeheader()
         writer.writerow(row)
 
-    await update.message.reply_text("Готово. Конспект сохранён. Продолжим? /start", reply_markup=top_keyboard(s.tone))
+    await update.message.reply_text(
+        "Готово. Конспект сохранён. Продолжим? /start",
+        reply_markup=top_keyboard(s.tone)
+    )
     return WAIT_FREE_TEXT
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
