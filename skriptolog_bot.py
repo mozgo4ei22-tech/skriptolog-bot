@@ -289,7 +289,11 @@ async def build_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     ts = int(time.time())
     last = s.entries[-5:]
-    entries_text = " || ".join([f"[{e['intent']}] {e['client']} => {e['reply'].replace('\n',' ')}" for e in last])
+    entries_text = parts = []
+for e in last:
+    clean_reply = e['reply'].replace("\n", " ")
+    parts.append(f"[{e['intent']}] {e['client']} => {clean_reply}")
+entries_text = " || ".join(parts)
 
     row = {"timestamp": ts, "agent_id": uid, "summary": summary, "entries": entries_text}
     file_exists = os.path.exists(CSV_PATH)
