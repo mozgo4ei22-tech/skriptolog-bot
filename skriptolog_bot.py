@@ -1,13 +1,15 @@
-# skriptolog_bot.py
-# MVP Telegram-бот «Скриптолог»
+# ===== FILE: skriptolog_bot.py =====
+# Telegram-бот «Скриптолог» v4 — гибкие ответы + слоты + шаблоны + конспект
+# Запуск локально: pip install -r requirements.txt && python skriptolog_bot.py
+# Для Render как Background Worker: Build: pip install -r requirements.txt; Start: python skriptolog_bot.py
 
-import os
-import csv
-import time
+import os, csv, time, re, random
 from dataclasses import dataclass, field
 from typing import Dict, List
 
 from dotenv import load_dotenv
+from rapidfuzz import fuzz
+
 from telegram import (
     Update,
     InlineKeyboardMarkup,
@@ -29,7 +31,7 @@ load_dotenv()
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CSV_PATH = os.environ.get("CSV_PATH", "skritolog_notes.csv")
 
-(WAIT_FREE_TEXT, WAIT_CLIENT_NAME, WAIT_SUMMARY) = range(3)
+(WAIT_FREE_TEXT, WAIT_SUMMARY) = range(2)
 
 SITUATIONS = [
     ("not_interested", "Неинтересно / я ничего не оставлял"),
@@ -44,177 +46,170 @@ SITUATIONS = [
     ("send_whatsapp", "Пришлите в WhatsApp/почту"),
 ]
 
-RESPONSES: Dict[str, List[Dict[str, str]]] = {
-    "not_interested": [
-        {
-            "hook": "Понимаю, звонков сейчас много.",
-            "clar": "Чтобы не отвлекать — на что ориентируемся: район и бюджет?",
-            "frame": "У нас прямой доступ к закрытым предложениям от застройщиков, без лишнего шума.",
-            "close": "Соберу 3 точных варианта и пришлю сегодня до 17:00 — подойдёт?",
-        },
-        {
-            "hook": "Всё ок, я коротко и по делу.",
-            "clar": "Для себя или под инвестицию?",
-            "frame": "Покажу только то, что совпадает по критериям, без рассылок.",
-            "close": "Если ничего не подойдёт — больше не беспокою. Договорились?",
-        },
-    ],
-    "busy_later": [
-        {
-            "hook": "Понимаю — время ценно.",
-            "clar": "Когда удобно 5 минут связи: сегодня 18:00 или завтра 11:00?",
-            "frame": "Я подготовлю 2–3 варианта под ваши параметры, чтобы разговор был быстрым.",
-            "close": "Фиксируем слот?",
-        }
-    ],
-    "dont_need": [
-        {
-            "hook": "Слушаю вас.",
-            "clar": "Скажите, если бы смотрели — какой район/бюджет был бы комфортен?",
-            "frame": "Задам ещё 1–2 вопроса и честно скажу, есть ли что-то стоящее.",
-            "close": "Если не актуально — закроем диалог без спама. Ок?",
-        }
-    ],
-    "self_search": [
-        {
-            "hook": "Отлично, что сравниваете.",
-            "clar": "Можно ссылку на лот? Проверю идентичность по корпусу/этажу/отделке.",
-            "frame": "Часто цена расходится из‑за нюансов. Я добиваюсь паритета или бонусов.",
-            "close": "Если это точное совпадение — согласуем ту же цену или лучше.",
-        }
-    ],
-    "other_agent": [
-        {
-            "hook": "Понимаю, комфорт с агентом важен.",
-            "clar": "Что для вас критично в работе: скорость, глубина подбора или переговоры по цене?",
-            "frame": "Могу точечно добить условия — без смены агента, если так вам спокойнее.",
-            "close": "Проверю 2 позиции по условиям, вернусь с чёткими цифрами — удобно?",
-        }
-    ],
-    "expensive": [
-        {
-            "hook": "Согласен, цены в Москве непростые.",
-            "clar": "Какой коридор бюджета комфортен сейчас?",
-            "frame": "У нас есть акции/рассрочки от застройщиков, которых нет в открытых базах.",
-            "close": "Покажу два пути: A) строго в бюджете; Б) класс выше со скидкой. Что ближе?",
-        }
-    ],
-    "think_later": [
-        {
-            "hook": "Это взвешенное решение — всё ок.",
-            "clar": "Какая дата комфортна, чтобы вернуться к разговору?",
-            "frame": "За 4 недели по вашему сегменту цены слегка росли — лучше зафиксировать 2–3 лота в избранном.",
-            "close": "Подключу уведомление о снижении цены и новых корпусах — сделать?",
-        }
-    ],
-    "no_mortgage": [
-        {
-            "hook": "Понимаю про ставки.",
-            "clar": "Какой первый взнос комфортен?",
-            "frame": "Посчитаю субсидии застройщика и поэтапный платёж, плюс альтернативные банки.",
-            "close": "Пришлю 2 расчёта сегодня. Оставим ориентир по бюджету и сроку?",
-        }
-    ],
-    "just_browsing": [
-        {
-            "hook": "Замечательно — смотреть с умом всегда лучше.",
-            "clar": "Для себя или под инвестицию? И сколько минут до метро комфортно?",
-            "frame": "Соберу лёгкую подборку без навязчивости — 3 лучших варианта.",
-            "close": "Скину сегодня до 17:00, а короткий созвон на 5 минут сделаем?",
-        }
-    ],
-    "send_whatsapp": [
-        {
-            "hook": "Конечно, пришлю.",
-            "clar": "Чтобы не грузить, выберу 3 точных. Семья/инвестиция и коридор бюджета?",
-            "frame": "Так подборка попадёт в цель, без воды.",
-            "close": "Отправлю и отмечу 2 минуты на обратную связь — когда удобно?",
-        }
-    ],
-}
-
 KEYWORDS: Dict[str, List[str]] = {
-    "not_interested": ["неинтересно", "ничего не оставлял", "кто вы", "зачем звоните"],
-    "busy_later": ["занят", "перезвоните", "позже"],
-    "dont_need": ["не нужно", "не нужен", "не актуально"],
+    "not_interested": ["неинтерес", "ничего не оставлял", "кто вы", "зачем звоните"],
+    "busy_later": ["занят", "перезвон", "позже", "через", "после"],
+    "dont_need": ["не нужно", "не нужен", "не актуал"],
     "self_search": ["сам смотрю", "циан", "avito", "авито"],
     "other_agent": ["уже звонили", "другой агент", "есть агент"],
-    "expensive": ["дорого", "цены кусаются", "дороговато", "дорогая"],
+    "expensive": ["дорого", "кусают", "дороговато", "дорогая", "цены"],
     "think_later": ["подумаю", "через месяц", "позже решу"],
-    "no_mortgage": ["ипотека", "ставка", "не одобрили", "нет одобрения"],
-    "just_browsing": ["присматриваюсь", "смотрю пока"],
-    "send_whatsapp": ["whatsapp", "ватсап", "почту", "email", "e-mail"],
+    "no_mortgage": ["ипотек", "ставк", "не одобрили", "нет одобрения", "банк"],
+    "just_browsing": ["присматриваюсь", "смотрю пока", "пока смотрю"],
+    "send_whatsapp": ["whatsapp", "ватсап", "почту", "email", "e-mail", "электрон"],
+}
+
+DISTRICT_PAT = re.compile(r"(цao|сао|свао|вао|ювао|юао|юзао|зао|сзао|зелао|нао|тинао|новая москва)", re.I)
+TONES = ["мягкий","уверенный","эксперт"]
+TONE_PHRASES = {
+    "мягкий": {
+        "hook": ["Понимаю вас.", "Всё ок, давайте спокойно посмотрим."],
+        "ask": ["Чуть уточню, чтобы попасть в цель:", "Задам 1–2 коротких вопроса:"],
+        "close": ["Соберу 3 точных варианта и пришлю сегодня — подойдёт?", "Договоримся на короткий созвон на 5 минут?"],
+    },
+    "уверенный": {
+        "hook": ["Сделаем быстро и по делу.", "Возьму на себя подбор, чтобы вы не тратили время."],
+        "ask": ["Проверьте, верно ли понимаю:", "Уточню ключевые параметры:"],
+        "close": ["Покажу 2 сильных варианта, согласуем время связи.", "Зафиксирую слот на сегодня 18:00 — удобно?"],
+    },
+    "эксперт": {
+        "hook": ["Сфокусируемся на факторах, что реально влияют на цену.", "Соберу выборку с акциями и корректной сопоставимостью."],
+        "ask": ["Нужны 3 параметра:", "Подтвердите ключевые границы:"],
+        "close": ["Отправлю сравнение на 1 экран + рекомендацию. Ок?", "Сделаю бенчмарк и выйду с цифрами."],
+    },
+}
+
+INTENT_LIB: Dict[str, Dict[str, List[str]]] = {
+    "not_interested": {"frame": ["Работаю по новостройкам Москвы, без лишних рассылок. Подберу ровно под {goal}."]},
+    "busy_later": {"frame": ["Подготовлю 2–3 варианта под {budget} {district} {rooms} и свяжемся {time}."]},
+    "dont_need": {"frame": ["Если будете смотреть, ориентир по бюджету {budget} и до метро {metro} — так попаду точнее."]},
+    "self_search": {"frame": ["Часто цена «гуляет» из‑за корпуса/этажа/отделки. Пришлите ссылку — проверю и добьюсь паритета."]},
+    "other_agent": {"frame": ["Останемся в вашей связке: точечно улучшу условия без смены агента — так комфортнее."]},
+    "expensive": {"frame": ["Есть акции и поэтапный платёж у застройщиков. Покажу путь «строго в {budget}» и «класс выше со скидкой»."]},
+    "think_later": {"frame": ["За месяц в сегменте мог быть рост. Зафиксируем 2–3 лота и включим уведомления по цене."]},
+    "no_mortgage": {"frame": ["Посчитаю субсидии и альтернативные банки под первый взнос. Срок одобрения учтём."]},
+    "just_browsing": {"frame": ["Соберу лёгкую подборку: 3 лучших по {goal} и {metro}."]},
+    "send_whatsapp": {"frame": ["Пришлю 3 точных варианта в WhatsApp. Чтобы не грузить, уточню 2 момента и попаду в цель."]},
 }
 
 @dataclass
 class SessionNote:
     user_id: int
-    client_name: str = "—"
+    tone: str = "уверенный"
     entries: List[Dict[str, str]] = field(default_factory=list)
 
 SESSIONS: Dict[int, SessionNote] = {}
 
-def top_keyboard():
-    rows = []
-    row = []
-    for i, (_, title) in enumerate(SITUATIONS, 1):
-        row.append(KeyboardButton(f"{i}. {title}"))
-        if i % 2 == 0:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    rows.append([KeyboardButton("Свободный ввод фразы клиента")])
-    rows.append([KeyboardButton("Итоги разговора")])
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+def ensure_session(uid: int) -> SessionNote:
+    if uid not in SESSIONS:
+        SESSIONS[uid] = SessionNote(user_id=uid)
+    return SESSIONS[uid]
 
-def classify(text: str) -> str:
+# ===== Извлечение слотов из свободной речи =====
+
+def extract_slots(text: str) -> Dict[str, str]:
     t = text.lower()
-    best_key = "not_interested"
-    best_hits = 0
+    slots: Dict[str, str] = {}
+    m = re.search(r"(\d{1,3})(?:[.,](\d))?\s*(?:-|–|до)?\s*(\d{1,3})?\s*(?:млн|млн\.|миллиона|млн руб|млн₽)?", t)
+    if m:
+        left, right = m.group(1), m.group(3)
+        slots["budget"] = (f"{left}–{right} млн" if right else f"до {left} млн")
+    if "студ" in t:
+        slots["rooms"] = "студия"
+    else:
+        m = re.search(r"([1-5])\s*к", t)
+        if m:
+            slots["rooms"] = f"{m.group(1)}к"
+    m = re.search(r"(?:до|не более|макс)\s*(\d{1,2})\s*мин", t)
+    if m:
+        slots["metro"] = f"≤{m.group(1)} мин"
+    if "сегодня" in t or "вечер" in t:
+        slots["time"] = "сегодня"
+    elif "завтра" in t:
+        slots["time"] = "завтра"
+    elif "выходн" in t:
+        slots["time"] = "на выходных"
+    elif "через" in t:
+        m = re.search(r"через\s+(\d+)\s*(дн|нед|мес)", t)
+        if m:
+            unit = {"дн":"дн.","нед":"нед.","мес":"мес."}[m.group(2)]
+            slots["time"] = f"через {m.group(1)} {unit}"
+    md = DISTRICT_PAT.search(t)
+    if md:
+        slots["district"] = md.group(0).upper().replace("ЦAO","ЦАО")
+    if "инвест" in t or "сдач" in t:
+        slots["goal"] = "инвестиция"
+    elif "для себя" in t or "жив" in t:
+        slots["goal"] = "для себя"
+    return slots
+
+# ===== Классификация интента =====
+
+def detect_intent(text: str) -> str:
+    t = text.lower()
+    best_key, best_hits = "not_interested", 0
     for key, kws in KEYWORDS.items():
         hits = sum(1 for w in kws if w in t)
         if hits > best_hits:
-            best_hits = hits
-            best_key = key
+            best_key, best_hits = key, hits
+    if best_hits > 0:
+        return best_key
+    # fuzzy запасной
+    best_key, best_score = "not_interested", 0
+    for key, kws in KEYWORDS.items():
+        for w in kws:
+            score = fuzz.partial_ratio(t, w)
+            if score > best_score:
+                best_key, best_score = key, score
     return best_key
 
-def format_response_block(v: Dict[str, str]) -> str:
-    return (
-        f"— {v['hook']}\n"
-        f"— {v['clar']}\n"
-        f"— {v['frame']}\n"
-        f"— {v['close']}"
-    )
+# ===== Сборка ответа =====
 
-def build_variants(sit_key: str) -> List[str]:
-    variants = []
-    for v in RESPONSES.get(sit_key, []):
-        variants.append(format_response_block(v))
-    if not variants:
-        variants.append("— Понял вас.\n— Уточню 1–2 момента, чтобы предложить точнее.\n— Подберу без лишних сообщений.\n— Пришлю 2–3 варианта сегодня — удобно?")
-    return variants
+def compose_reply(intent: str, tone: str, slots: Dict[str, str]) -> str:
+    pack = TONE_PHRASES.get(tone, TONE_PHRASES["уверенный"])
+    hook = random.choice(pack["hook"]) 
+    ask = random.choice(pack["ask"]) 
+    frame_tpl = random.choice(INTENT_LIB.get(intent, {}).get("frame", ["Подберу точечно под ваш запрос."]))
+    def s(k): return slots.get(k)
+    frame = frame_tpl.format(budget=s("budget"), rooms=s("rooms"), district=s("district"), metro=s("metro"), goal=s("goal"), time=s("time"))
+    close = random.choice(pack["close"]) 
+    return f"— {hook}\n— {ask}\n— {frame}\n— {close}"
+
+# ===== UI =====
+
+def top_keyboard(tone: str):
+    rows, row = [], []
+    for i, (_, title) in enumerate(SITUATIONS, 1):
+        row.append(KeyboardButton(f"{i}. {title}"))
+        if i % 2 == 0:
+            rows.append(row); row = []
+    if row: rows.append(row)
+    rows.append([KeyboardButton("Свободный ввод фразы клиента")])
+    rows.append([KeyboardButton("Итоги разговора")])
+    rows.append([KeyboardButton(f"Тон: {tone}")])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+
+# ===== Handlers =====
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ensure_session(update.effective_user.id)
-    await update.message.reply_text(
-        "Скриптолог на связи. Выберите ситуацию или введите фразу клиента.",
-        reply_markup=top_keyboard(),
-    )
+    s = ensure_session(update.effective_user.id)
+    await update.message.reply_text("Скриптолог v4 на связи. Выберите ситуацию или введите фразу клиента.", reply_markup=top_keyboard(s.tone))
     return WAIT_FREE_TEXT
-
-def ensure_session(user_id: int) -> SessionNote:
-    if user_id not in SESSIONS:
-        SESSIONS[user_id] = SessionNote(user_id=user_id)
-    return SESSIONS[user_id]
 
 async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     uid = update.effective_user.id
+    s = ensure_session(uid)
 
     if text.startswith("Итоги"):
-        await update.message.reply_text("Как зовут клиента? (для конспекта)")
-        return WAIT_CLIENT_NAME
+        await update.message.reply_text("Коротко: итог разговора (1–2 фразы):")
+        return WAIT_SUMMARY
+
+    if text.startswith("Тон:"):
+        idx = TONES.index(s.tone)
+        s.tone = TONES[(idx + 1) % len(TONES)]
+        await update.message.reply_text(f"Тон переключён: {s.tone}", reply_markup=top_keyboard(s.tone))
+        return WAIT_FREE_TEXT
 
     if text.startswith("Свободный"):
         await update.message.reply_text("Напишите фразу клиента целиком.")
@@ -222,105 +217,99 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         idx = int(text.split(".")[0]) - 1
-        sit_key, sit_title = SITUATIONS[idx]
+        intent, title = SITUATIONS[idx]
     except Exception:
-        sit_key = classify(text)
-        sit_title = dict(SITUATIONS).get(sit_key, sit_key)
+        intent = detect_intent(text)
+        title = dict(SITUATIONS).get(intent, intent)
 
-    variants = build_variants(sit_key)
-    best = variants[0]
+    slots = extract_slots(text)
+    reply = compose_reply(intent, s.tone, slots)
 
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Ещё вариант", callback_data=f"more:{sit_key}")],
-        [InlineKeyboardButton("Копировать лучший", callback_data="copy")],
+        [InlineKeyboardButton("Ещё вариант", callback_data=f"more:{intent}")],
         [InlineKeyboardButton("Итоги разговора", callback_data="summary")],
+        [InlineKeyboardButton("Тон ⟳", callback_data="tone")],
     ])
 
-    await update.message.reply_text(
-        f"<b>{sit_title}</b>\n\n{best}",
-        parse_mode="HTML",
-        reply_markup=kb,
-    )
+    s.entries.append({"client": text, "intent": intent, "reply": reply})
+    await update.message.reply_text(f"<b>{title}</b>\n\n{reply}", parse_mode="HTML", reply_markup=kb)
     return WAIT_FREE_TEXT
 
-async def handle_free_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_free(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     uid = update.effective_user.id
+    s = ensure_session(uid)
 
-    sit_key = classify(text)
-    sit_title = dict(SITUATIONS).get(sit_key, sit_key)
-    variants = build_variants(sit_key)
-    best = variants[0]
+    intent = detect_intent(text)
+    slots = extract_slots(text)
+    reply = compose_reply(intent, s.tone, slots)
+    title = dict(SITUATIONS).get(intent, intent)
 
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Ещё вариант", callback_data=f"more:{sit_key}")],
-        [InlineKeyboardButton("Копировать лучший", callback_data="copy")],
+        [InlineKeyboardButton("Ещё вариант", callback_data=f"more:{intent}")],
         [InlineKeyboardButton("Итоги разговора", callback_data="summary")],
+        [InlineKeyboardButton("Тон ⟳", callback_data="tone")],
     ])
 
-    await update.message.reply_text(
-        f"<b>{sit_title}</b>\n\n{best}",
-        parse_mode="HTML",
-        reply_markup=kb,
-    )
+    s.entries.append({"client": text, "intent": intent, "reply": reply})
+    await update.message.reply_text(f"<b>{title}</b>\n\n{reply}", parse_mode="HTML", reply_markup=kb)
     return WAIT_FREE_TEXT
 
-async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    s = ensure_session(uid)
 
-    if query.data.startswith("more:"):
-        sit_key = query.data.split(":", 1)[1]
-        variants = build_variants(sit_key)
-        text = variants[1] if len(variants) > 1 else variants[0]
-        await query.edit_message_text(text)
+    if q.data.startswith("more:"):
+        intent = q.data.split(":",1)[1]
+        # Возьмём слоты из последнего совпадающего запроса
+        slots = {}
+        for e in reversed(s.entries):
+            if e["intent"] == intent:
+                slots = extract_slots(e["client"]); break
+        reply = compose_reply(intent, s.tone, slots)
+        await q.edit_message_text(reply)
         return
 
-    if query.data == "copy":
-        await query.edit_message_text("Текст скопирован — используйте в звонке. Нажмите ‘Итоги разговора’, когда будете готовы.")
+    if q.data == "tone":
+        idx = TONES.index(s.tone)
+        s.tone = TONES[(idx + 1) % len(TONES)]
+        await q.edit_message_text(f"Тон переключён: {s.tone}")
         return
 
-    if query.data == "summary":
-        await query.edit_message_text("Как зовут клиента? (для конспекта)")
-        return WAIT_CLIENT_NAME
-
-async def ask_client_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Коротко: что важнее всего для клиента? (1–2 фразы)")
-    return WAIT_SUMMARY
+    if q.data == "summary":
+        await q.edit_message_text("Коротко: итог разговора (1–2 фразы):")
+        return WAIT_SUMMARY
 
 async def build_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    important = update.message.text.strip()
+    uid = update.effective_user.id
+    s = ensure_session(uid)
+    summary = update.message.text.strip()
 
     ts = int(time.time())
-    row = {
-        "timestamp": ts,
-        "agent_id": update.effective_user.id,
-        "client_name": "-",  # упрощённо: имя можно запросить отдельной командой
-        "important": important,
-        "entries": important,  # в MVP пишем краткий итог
-    }
+    last = s.entries[-5:]
+    entries_text = " || ".join([f"[{e['intent']}] {e['client']} => {e['reply'].replace('\n',' ')}" for e in last])
 
+    row = {"timestamp": ts, "agent_id": uid, "summary": summary, "entries": entries_text}
     file_exists = os.path.exists(CSV_PATH)
     with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=list(row.keys()))
-        if not file_exists:
-            writer.writeheader()
+        if not file_exists: writer.writeheader()
         writer.writerow(row)
 
-    await update.message.reply_text(
-        "Готово. Конспект сохранён. Продолжим? Выберите ситуацию или введите фразу клиента.",
-        reply_markup=top_keyboard(),
-    )
+    await update.message.reply_text("Готово. Конспект сохранён. Продолжим? /start", reply_markup=top_keyboard(s.tone))
     return WAIT_FREE_TEXT
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Ок, вернёмся позже. Наберите /start, чтобы продолжить.")
     return ConversationHandler.END
 
+# ===== main =====
+
 def main():
     if not BOT_TOKEN:
-        raise RuntimeError("Установите BOT_TOKEN в .env")
-
+        raise RuntimeError("Установите BOT_TOKEN в .env или в Environment Variables")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     conv = ConversationHandler(
@@ -329,21 +318,20 @@ def main():
             WAIT_FREE_TEXT: [
                 MessageHandler(filters.Regex("^(Итоги разговора)$"), handle_menu),
                 MessageHandler(filters.Regex("^(Свободный ввод фразы клиента)$"), handle_menu),
-                MessageHandler(filters.Regex("^([1-9]|10)\\..*"), handle_menu),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_free_text),
+                MessageHandler(filters.Regex("^([1-9]|10)\..*"), handle_menu),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_free),
             ],
-            WAIT_CLIENT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_client_name)],
             WAIT_SUMMARY: [MessageHandler(filters.TEXT & ~filters.COMMAND, build_summary)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True,
     )
-
     app.add_handler(conv)
-    app.add_handler(CallbackQueryHandler(on_callback))
+    app.add_handler(CallbackQueryHandler(on_cb))
 
-    print("Skriptolog запущен...")
+    print("Skriptolog v4 запущен...")
     app.run_polling()
 
 if __name__ == "__main__":
     main()
+
